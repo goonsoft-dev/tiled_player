@@ -1,0 +1,31 @@
+# Build output
+/build/
+/app/build/
+/captures/
+
+# Gradle
+.gradle/
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Signing material.
+#
+# The keystore signs every release build. Committing it would put the signing
+# key in version control - but losing it means future builds can't upgrade an
+# existing install, only replace it. Back it up somewhere deliberate before
+# relying on this ignore rule. keystore.properties holds its passwords; see
+# keystore.properties.example.
+tiled-player-release.jks
+*.keystore
+*.jks
+keystore.properties
+
+# Claude Code local settings
+.claude/settings.local.json

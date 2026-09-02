@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Used only by the "On device" tab, to list the gallery so videos can be
+      picked for import. The "In player" tab (the app's own copies) needs no
+      permission at all, and neither does adding videos through the system
+      photo picker - which is what makes the app usable from the hidden-app
+      drawer, where the Private Safe is out of reach.
+    -->
+    <uses-permission
+        android:name="android.permission.READ_MEDIA_VIDEO"
+        android:minSdkVersion="33" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- Android 14+: the user may grant access to only some videos. -->
+    <uses-permission
+        android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+        android:minSdkVersion="34" />
+
+    <!-- Streaming web video, the in-app browser, and downloads. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
+      allowBackup=false: the imported copies live in internal storage, so
+      leaving backup on would upload them to cloud backup / hand them to a
+      device-to-device transfer - exactly what someone using this app is
+      trying to avoid.
+    -->
+    <!--
+      usesCleartextTraffic: plain-http direct video links are still common on
+      the open web, and refusing them would silently break "play this link"
+      for no security gain the user cares about here (this app streams media,
+      it has no account or credential of its own to protect in transit).
+    -->
+    <application
+        android:name=".TiledPlayerApp"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.TiledPlayer">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
+            android:theme="@style/Theme.TiledPlayer">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          External-player entry point, kept on an alias rather than on
+          MainActivity itself so it can be switched off at runtime
+          (PackageManager.setComponentEnabledSetting) without touching the
+          launcher entry.
+
+          That switch matters here: being registered for these intents puts the
+          app's name and icon in Chrome's "Open with" list and in the system
+          share sheet, where anyone sharing anything will see it. For an app
+          meant to live in the hidden drawer that's a real disclosure, so it's
+          user-toggleable - on by default, because handing videos over from the
+          browser is the whole point of the feature.
+        -->
+        <activity-alias
+            android:name=".OpenWithActivity"
+            android:targetActivity=".MainActivity"
+            android:exported="true"
+            android:enabled="true">
+
+            <!-- A web video handed over by another app, with a declared type. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" android:mimeType="video/*" />
+                <data android:scheme="https" android:mimeType="video/*" />
+            </intent-filter>
+
+            <!--
+              The same, for the many apps that fire a VIEW with no mime type at
+              all. Matching on the extension is the only signal available then.
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.mp4" />
+                <data android:pathPattern=".*\\.webm" />
+                <data android:pathPattern=".*\\.mkv" />
+                <data android:pathPattern=".*\\.m4v" />
+                <data android:pathPattern=".*\\.mov" />
+                <data android:pathPattern=".*\\.m3u8" />
+                <data android:pathPattern=".*\\.mpd" />
+            </intent-filter>
+
+            <!-- "Open with" on a local video, e.g. from a file manager. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="video/*" />
+                <data android:scheme="file" android:mimeType="video/*" />
+            </intent-filter>
+
+            <!-- Sharing a page or video link from the browser. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+
+            <!-- Sharing actual video files in, which imports them. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
+        </activity-alias>
+    </application>
+</manifest>
