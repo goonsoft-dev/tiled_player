@@ -110,11 +110,11 @@ private val SUPPORTED_VIDEO_MIME_TYPES = arrayOf(
  *
  * **Player** is the vault: videos copied into the app's own private storage by
  * [VaultImport]. They keep playing after the original has been hidden, moved
- * into the Private Safe, or deleted, and they need no storage permission at
- * all — which is what makes the app usable from ColorOS's hidden-app drawer,
- * where the Private Safe is unreachable. They can also be **exported** back
- * out to a folder, which is the only defence against the copies dying with the
- * app's data.
+ * into a vendor-specific secure/private folder, or deleted, and they need no
+ * storage permission at all — which is what makes the app usable from a
+ * hidden-app drawer, where that secure folder is unreachable. They can also
+ * be **exported** back out to a folder, which is the only defence against the
+ * copies dying with the app's data.
  *
  * **Online** is [RemoteLibrary]: bookmarked URLs that stream straight off the
  * web, so a video can be watched (and tiled) without ever being stored. Any of
@@ -1063,11 +1063,11 @@ private fun VideoGridOrList(
     when (viewMode) {
         LibraryViewMode.CARDS -> LazyVerticalGrid(
             state = gridState,
-            // 168dp only ever fit 2 columns even on a large phone (Oppo Find
-            // X9 Pro's ~452dp content width just misses a 3rd 168dp column),
-            // so a big screen was rendering the same 2-wide grid as a small
-            // one. 130dp lets wide phones reach 3 (each card still renders
-            // ~136dp once 3 columns is chosen) while narrow phones stay at 2.
+            // 168dp only ever fit 2 columns even on a large phone (a ~452dp
+            // content width just misses a 3rd 168dp column), so a big screen
+            // was rendering the same 2-wide grid as a small one. 130dp lets
+            // wide phones reach 3 (each card still renders ~136dp once 3
+            // columns is chosen) while narrow phones stay at 2.
             columns = GridCells.Adaptive(minSize = 130.dp),
             contentPadding = PaddingValues(12.dp, 4.dp, 12.dp, 88.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),

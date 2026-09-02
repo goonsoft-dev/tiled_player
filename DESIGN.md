@@ -437,9 +437,10 @@ reachable at the address it was picked from. Two independent cases matter:
 - The user **hides** or moves a video into a system "private/secure
   folder", after which the media index no longer returns it and any
   previously granted per-file read grant stops resolving.
-- The app runs from a **restricted launcher context** (e.g. ColorOS's
-  hidden-app drawer) that is deliberately denied access to the platform's
-  secure-storage area, so files placed there are unreachable *by design*.
+- The app runs from a **restricted launcher context** (e.g. some OEM
+  launchers' hidden-app drawers) that is deliberately denied access to the
+  platform's secure-storage area, so files placed there are unreachable
+  *by design*.
 
 In both cases a player that merely holds a reference to the original file
 breaks. The fix is for the app to own a copy.
