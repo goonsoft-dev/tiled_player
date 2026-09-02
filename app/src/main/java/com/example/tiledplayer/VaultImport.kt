@@ -60,10 +60,10 @@ data class ImportState(
  * Deliberately *not* a foreground service: a service would need a visible
  * notification, which defeats the point of an app that lives in the hidden
  * drawer. The trade-off is that a copy only runs while the app is in the
- * foreground — ColorOS may freeze the process once it's backgrounded — so an
- * interrupted copy leaves a `.part` file, which [VaultStore.sweepPartials]
- * clears on the next launch. Nothing half-copied is ever committed to the
- * index, so an interruption costs time, never data.
+ * foreground — some OEMs' battery managers may freeze the process once it's
+ * backgrounded — so an interrupted copy leaves a `.part` file, which
+ * [VaultStore.sweepPartials] clears on the next launch. Nothing half-copied
+ * is ever committed to the index, so an interruption costs time, never data.
  */
 object VaultImport {
 

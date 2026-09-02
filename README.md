@@ -6,13 +6,15 @@ are live-editable: resize with dividers, swap panes, pinch-zoom individual
 tiles, unmute whichever pane you want to hear.
 
 Around that player sits a private video library, built for one specific
-constraint: **ColorOS's hidden-app drawer can't reach the Private Safe**, and a
-video that's merely been *hidden* in the gallery stops resolving through
-MediaStore. So the app keeps its own copies instead of referencing yours.
+constraint: **some OEM launchers' hidden-app drawers can't reach the
+device's secure/private folder**, and a video that's merely been *hidden* in
+the gallery stops resolving through MediaStore. So the app keeps its own
+copies instead of referencing yours.
 
 [`DESIGN.md`](DESIGN.md) is the authoritative spec — a platform-agnostic
 description of every rule here, written so the app can be rebuilt elsewhere.
 Where this code and that document disagree, the document wins.
+[`NOTES.md`](NOTES.md) tracks open follow-ups.
 
 ## What it does
 

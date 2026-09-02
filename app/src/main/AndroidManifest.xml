@@ -5,8 +5,8 @@
       Used only by the "On device" tab, to list the gallery so videos can be
       picked for import. The "In player" tab (the app's own copies) needs no
       permission at all, and neither does adding videos through the system
-      photo picker - which is what makes the app usable from the hidden-app
-      drawer, where the Private Safe is out of reach.
+      photo picker - which is what makes the app usable from a hidden-app
+      drawer, where a vendor-specific secure folder is out of reach.
     -->
     <uses-permission
         android:name="android.permission.READ_MEDIA_VIDEO"

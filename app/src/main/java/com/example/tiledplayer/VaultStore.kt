@@ -75,11 +75,12 @@ data class VaultVideo(
  * The app's private copy of every imported video, kept in internal storage
  * (`filesDir/vault/`).
  *
- * This exists because ColorOS's hidden-app drawer can't reach files in the
- * device's Private Safe, and because a video that has merely been *hidden* in
- * the gallery is no longer readable through MediaStore or through a previously
- * granted SAF permission. Holding our own copy means playback keeps working
- * after the original is hidden, moved into the safe, or deleted outright.
+ * This exists because some OEM launchers' hidden-app drawers can't reach
+ * files in the device's secure/private folder, and because a video that has
+ * merely been *hidden* in the gallery is no longer readable through
+ * MediaStore or through a previously granted SAF permission. Holding our own
+ * copy means playback keeps working after the original is hidden, moved into
+ * that folder, or deleted outright.
  *
  * Properties that matter for that use:
  *  - internal storage is private to this app and is not media-scanned, so the
@@ -280,8 +281,8 @@ object VaultStore {
 
     /**
      * Deletes leftovers from imports that were killed mid-copy (process death,
-     * ColorOS background cleanup). Safe to call on every launch: a `.part` file
-     * is never referenced by the index, so nothing playable can be lost.
+     * an OEM's background cleanup). Safe to call on every launch: a `.part`
+     * file is never referenced by the index, so nothing playable can be lost.
      */
     fun sweepPartials(context: Context) {
         runCatching {
