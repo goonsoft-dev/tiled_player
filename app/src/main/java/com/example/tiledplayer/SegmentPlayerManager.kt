@@ -25,20 +25,42 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.random.Random
+
+/**
+ * How each pane picks the slice of its video it plays.
+ */
+sealed interface PlaybackMode {
+    /** Each pane loops one fixed slice of its video forever (the original behavior). */
+    data object Loop : PlaybackMode
+
+    /**
+     * Each pane plays a random slice of its video, [minMs]..[maxMs] long; the
+     * instant one slice ends, a fresh slice — new random length and start
+     * point, same video — replaces it, forever. A video shorter than [minMs]
+     * just plays whole instead of failing to find a slice that fits.
+     */
+    data class Random(val minMs: Long, val maxMs: Long) : PlaybackMode
+}
 
 /**
  * Owns one ExoPlayer per pane. The [paneCount] panes are divided among the
  * chosen [uris] as evenly as possible (earlier videos take the extra pane when
- * it doesn't divide evenly); each video is then split into as many equal time
- * segments as it received panes, and one segment plays per pane on a loop.
+ * it doesn't divide evenly). What each pane then plays depends on [mode]: in
+ * [PlaybackMode.Loop] (the default) each video is split into as many equal
+ * time segments as it received panes, and one segment plays per pane on a
+ * loop; in [PlaybackMode.Random] every pane assigned to a video instead plays
+ * an ever-changing run of random-length slices from that video's full length,
+ * independent of its sibling panes.
  *
  * A single video therefore behaves like before (split into [paneCount] slices);
  * with several videos, each occupies a contiguous block of panes.
  *
  * All players are prepared up front and started together once every pane has
  * either buffered or given up (failed), so the tiles begin in sync. Because
- * segment lengths can differ between videos, the scrubber works in a 0..1
- * fraction of each pane's own segment rather than absolute milliseconds.
+ * segment lengths can differ between videos (and, in random mode, over time),
+ * the scrubber works in a 0..1 fraction of each pane's own current segment
+ * rather than absolute milliseconds.
  *
  * Failure isolation: a bad file (unreadable, corrupt, unsupported codec, or a
  * device that's simply out of decoders) fails only the panes it occupies —
@@ -50,6 +72,7 @@ class SegmentPlayerManager(
     private val context: Context,
     private val clips: List<PlaybackClip>,
     private val paneCount: Int,
+    private var mode: PlaybackMode = PlaybackMode.Loop,
 ) {
     /** Index-aligned with pane index; null means that pane failed to load. */
     val players = mutableListOf<ExoPlayer?>()
@@ -156,6 +179,17 @@ class SegmentPlayerManager(
         data class Failed(val reason: String) : SegmentSpec()
     }
 
+    /** A random-mode pane's video, kept around so a finished slice can be replaced by another. */
+    private data class VideoSpan(
+        val uri: Uri,
+        val headers: Map<String, String>,
+        val offsetMs: Long,
+        val durMs: Long,
+    )
+
+    /** Index-aligned with pane index; null for a [PlaybackMode.Loop] pane or a failed one. */
+    private var videoSpans: Array<VideoSpan?> = arrayOf()
+
     fun initialize(onReady: () -> Unit, onError: (String) -> Unit, onPaneFailed: (Int) -> Unit = {}) {
         onReadyCb = onReady
         onErrorCb = onError
@@ -237,6 +271,19 @@ class SegmentPlayerManager(
     }
 
     /**
+     * Picks a random slice of a [durMs]-long (trimmed) video, [minMs]..[maxMs]
+     * long. When the video is too short for even [minMs], the whole thing is
+     * the slice (never fails to produce something playable).
+     */
+    private fun randomSlice(durMs: Long, minMs: Long, maxMs: Long): Pair<Long, Long> {
+        val hi = maxMs.coerceAtMost(durMs)
+        val lo = minMs.coerceAtMost(hi)
+        val len = if (hi <= lo) hi.coerceAtLeast(1L) else Random.nextLong(lo, hi + 1)
+        val start = if (durMs <= len) 0L else Random.nextLong(0L, durMs - len + 1)
+        return start to (start + len).coerceAtMost(durMs)
+    }
+
+    /**
      * Builds the ordered per-pane segment list (video by video). A video
      * whose duration couldn't be read still gets its allocated pane count
      * (so the chosen layout's pane count never silently shrinks) — those
@@ -246,6 +293,8 @@ class SegmentPlayerManager(
     private fun planSegments(durations: List<Long?>): List<SegmentSpec> {
         val panesPerVideo = distributePanes(clips.size)
         val specs = mutableListOf<SegmentSpec>()
+        val spans = mutableListOf<VideoSpan?>()
+        val randomMode = mode as? PlaybackMode.Random
         for (v in clips.indices) {
             val k = panesPerVideo[v]
             if (k <= 0) continue
@@ -254,29 +303,48 @@ class SegmentPlayerManager(
             if (dur == null || dur <= 0L) {
                 if (clip.isRemote) {
                     // An adaptive stream (HLS/DASH) has no duration to probe
-                    // up front, so there's nothing to divide. Rather than fail
-                    // outright, give it one pane playing the whole stream and
-                    // say plainly why the rest are empty — splitting it would
-                    // also mean fetching the same stream k times over.
+                    // up front, so there's nothing to divide (or randomize).
+                    // Rather than fail outright, give it one pane playing the
+                    // whole stream and say plainly why the rest are empty —
+                    // splitting it would also mean fetching the same stream k
+                    // times over.
                     specs.add(SegmentSpec.Playable(clip.uri, 0L, null, clip.headers))
+                    spans.add(null)
                     repeat(k - 1) {
                         specs.add(SegmentSpec.Failed("A live or adaptive stream can't be split into segments."))
+                        spans.add(null)
                     }
                 } else {
-                    repeat(k) { specs.add(SegmentSpec.Failed("Could not read this video's duration.")) }
+                    repeat(k) {
+                        specs.add(SegmentSpec.Failed("Could not read this video's duration."))
+                        spans.add(null)
+                    }
                 }
                 continue
             }
             // [dur] is the *trimmed* length, so segments divide the trimmed
             // range; the clip's in-point shifts them onto the real timeline.
             val offset = clip.startMs
-            val seg = dur / k
-            for (j in 0 until k) {
-                val start = j * seg
-                val end = if (j == k - 1) dur else (j + 1) * seg
-                specs.add(SegmentSpec.Playable(clip.uri, offset + start, offset + end, clip.headers))
+            if (randomMode != null) {
+                // Every pane assigned to this video independently picks its
+                // own random slice of the video's *full* trimmed length —
+                // unlike loop mode, they don't partition it into k pieces.
+                repeat(k) {
+                    val (start, end) = randomSlice(dur, randomMode.minMs, randomMode.maxMs)
+                    specs.add(SegmentSpec.Playable(clip.uri, offset + start, offset + end, clip.headers))
+                    spans.add(VideoSpan(clip.uri, clip.headers, offset, dur))
+                }
+            } else {
+                val seg = dur / k
+                for (j in 0 until k) {
+                    val start = j * seg
+                    val end = if (j == k - 1) dur else (j + 1) * seg
+                    specs.add(SegmentSpec.Playable(clip.uri, offset + start, offset + end, clip.headers))
+                    spans.add(null)
+                }
             }
         }
+        videoSpans = spans.toTypedArray()
         return specs
     }
 
@@ -361,7 +429,9 @@ class SegmentPlayerManager(
                 .build()
             player.apply {
                 setMediaItem(item)
-                repeatMode = Player.REPEAT_MODE_ONE
+                // Loop mode repeats this one clip forever; random mode instead
+                // lets it run to the end and picks a fresh slice there (below).
+                repeatMode = if (mode is PlaybackMode.Random) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
                 playWhenReady = false
                 volume = paneVolumes.getOrElse(i) { 0f }
                 // Media attributes for correct routing; focus is managed by
@@ -394,6 +464,11 @@ class SegmentPlayerManager(
                                     if (segmentDurationMs <= 0L) segmentDurationMs = d
                                 }
                             }
+                        } else if (state == Player.STATE_ENDED && i !in failedPaneIndices) {
+                            // Only reachable in random mode (loop mode never
+                            // leaves REPEAT_MODE_ONE, so it never ends) — the
+                            // current slice ran out, so hand the pane a new one.
+                            advanceRandomSegment(i)
                         }
                     }
 
@@ -407,6 +482,37 @@ class SegmentPlayerManager(
         } catch (t: Throwable) {
             runCatching { player?.release() }
             failPane(i, t.message ?: "Couldn't start this pane.")
+        }
+    }
+
+    /**
+     * Random mode only: replaces pane [i]'s just-finished slice with a fresh
+     * random one from the same video. A no-op if the pane isn't a random-mode
+     * pane (no [VideoSpan] recorded for it) — e.g. it was left in loop mode,
+     * or is the one pane of a remote/adaptive source that plays unclipped.
+     */
+    private fun advanceRandomSegment(i: Int) {
+        if (released) return
+        val span = videoSpans.getOrNull(i) ?: return
+        val randomMode = mode as? PlaybackMode.Random ?: return
+        val player = players.getOrNull(i) ?: return
+        val (start, end) = randomSlice(span.durMs, randomMode.minMs, randomMode.maxMs)
+        val item = MediaItem.Builder()
+            .setUri(span.uri)
+            .setClippingConfiguration(
+                MediaItem.ClippingConfiguration.Builder()
+                    .setStartPositionMs(span.offsetMs + start)
+                    .setEndPositionMs(span.offsetMs + end)
+                    .build()
+            )
+            .build()
+        segmentDurations[i] = end - start
+        // Keep the scrubber's "total" label matching whichever pane
+        // [currentOffsetMs] samples from (the first playable one).
+        if (i == players.indexOfFirst { it != null }) segmentDurationMs = segmentDurations[i]
+        runCatching {
+            player.setMediaItem(item)
+            player.prepare()
         }
     }
 
@@ -453,6 +559,18 @@ class SegmentPlayerManager(
         if (released) return
         val params = PlaybackParameters(speed.coerceIn(0.1f, 2f))
         players.forEach { it?.playbackParameters = params }
+    }
+
+    /**
+     * Adjusts the random-slice length range live. A no-op when not in
+     * [PlaybackMode.Random] (nothing reads it in loop mode). Only affects
+     * each pane's *next* slice pick — the one currently playing runs to its
+     * already-chosen end.
+     */
+    fun setRandomRange(minMs: Long, maxMs: Long) {
+        if (mode !is PlaybackMode.Random) return
+        val lo = minMs.coerceAtLeast(500L)
+        mode = PlaybackMode.Random(lo, maxOf(maxMs, lo))
     }
 
     fun playAll() {

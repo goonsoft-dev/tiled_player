@@ -185,7 +185,8 @@ alignment when seeking.
   each other's frames — every player needs a *fresh* decoder resource).
 - **Clip to segment, loop the clip.** Each pane's player is configured with
   a hard start/end clip at its segment boundaries and loops that clip
-  indefinitely (repeat-one semantics), not the whole source video.
+  indefinitely (repeat-one semantics), not the whole source video. This is
+  the default play mode; §4.3 describes an alternative.
 - **Synchronized start.** Prepare every pane's player up front; do not mark
   any of them playing until *all* have buffered/are ready. Then start them
   together in the same tick. This is what makes "all tiles loop in sync"
@@ -243,6 +244,45 @@ the next means re-picking it on every switch.
   rather than restoring it onto the wrong panes — the videos or tile count
   changed since it was written.
 
+### 4.3 Random-segment play mode
+
+An alternative to the default fixed loop (§4's "clip to segment, loop the
+clip"): instead of every pane settling on one segment boundary for the whole
+session, each pane plays an unending, independent run of random-length clips
+cut from its own video, swapping to a fresh one the instant the current clip
+ends.
+
+- **Per pane, not per session.** Each pane assigned to a video (per §3's
+  `distribute_panes`) picks its own random clips independently of its
+  sibling panes on the same video — they are not required to stay in sync
+  with each other the way the §5.4 "start" barrier and §2.1 "loop" mode
+  panes are. Only the *initial* start across all panes is synchronized
+  (same barrier as always); after that, each pane's clip-to-clip timing is
+  its own.
+- **Clip length is a user-adjustable range**, not a fixed constant
+  (reference default: 5–10s). For each new clip, pick a length uniformly at
+  random within `[min, max]`, then a start point uniformly at random within
+  `[0, video_length - length]`, so the whole video is eligible, not just a
+  pane's original §3 slice. Changing the range while the mode is already
+  active should apply to each pane's *next* pick, not require tearing down
+  and restarting every pane's playback.
+- **A video shorter than `min` just plays whole** (start 0, length =
+  video_length) rather than failing to find a slice that fits, or looping
+  forever on a doomed random-range search.
+- **An adaptive stream (HLS/DASH) or any source with no probeable
+  duration can't use this mode** for the same reason §3 gives it one pane
+  playing the whole stream unclipped instead of dividing it — there's no
+  known length to pick a random point within. Leave such a pane on its
+  unclipped fallback regardless of which mode is active.
+- **Persist the chosen mode and range** across launches, the same way §5.2
+  persists the layout selection — toggling into random mode and setting a
+  comfortable range shouldn't need repeating every session.
+- The §5.3 scrubber and time labels have no fixed meaning across a whole
+  random-mode session (segment length changes every clip), but keep working
+  unmodified *within* whichever clip is currently showing: report/seek
+  against that pane's current clip length exactly as in loop mode. Nothing
+  about the scrubbing/seeking mechanism needs to know which mode is active.
+
 ## 5. Screens and interaction
 
 ### 5.1 Home screen: the library
@@ -295,6 +335,10 @@ Shared rules across all three:
     tap each.
   - Only one of {grid, a specific preset} is "active" at a time; switching
     either control deactivates the other.
+- The same ribbon carries a **play-mode toggle** (§4.3): loop (default) vs.
+  random-segment. While random mode is active, an adjacent control opens the
+  min/max clip-length range — this only needs to be reachable while the mode
+  is on, unlike the always-visible layout controls above.
 - **Reordering the presets is a first-class action**, not a hidden gesture:
   expose an explicit, always-reachable control (not itself inside the
   horizontally-scrolling chip row — if it scrolls with the chips, it
@@ -315,6 +359,8 @@ Shared rules across all three:
     offered but absent from the saved order are appended at the end in
     their built-in order — don't crash or reset to default on a partial
     match.
+  - The play-mode toggle and its clip-length range (§4.3), so a random-mode
+    session with a comfortable range resumes as such on relaunch.
   - On first launch (no saved layout), default the grid stepper near the
     picker's chosen tile count rather than always starting at 1×1: e.g.
     `N = round(sqrt(chosen_tile_count))`, clamped to the stepper's range.
