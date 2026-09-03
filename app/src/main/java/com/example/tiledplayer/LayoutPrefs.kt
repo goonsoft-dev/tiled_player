@@ -11,6 +11,7 @@ private const val KEY_AUDIO_PREFIX = "audio_"
 private const val KEY_RANDOM_MODE = "random_mode"
 private const val KEY_RANDOM_MIN_SEC = "random_min_sec"
 private const val KEY_RANDOM_MAX_SEC = "random_max_sec"
+private const val KEY_RIBBON_PINS = "ribbon_pins"
 
 // None of the built-in preset names contain a pipe, so a plain split is safe.
 private const val ORDER_SEPARATOR = "|"
@@ -115,6 +116,26 @@ object LayoutPrefs {
         val p = prefs(context)
         return p.getInt(KEY_RANDOM_MIN_SEC, 5) to p.getInt(KEY_RANDOM_MAX_SEC, 10)
     }
+
+    /**
+     * Which layout controls the user has chosen to keep as quick buttons in
+     * the player's top ribbon (the rest live only in the layout dropdown).
+     * Entries are preset names plus the sentinel returned by the caller for
+     * "the grid-size steppers". Empty by default — the ribbon starts as just
+     * the dropdown, and the user opts controls back in.
+     */
+    fun saveRibbonPins(context: Context, pins: Set<String>) {
+        prefs(context).edit()
+            .putString(KEY_RIBBON_PINS, pins.joinToString(ORDER_SEPARATOR))
+            .apply()
+    }
+
+    fun loadRibbonPins(context: Context): Set<String> =
+        prefs(context).getString(KEY_RIBBON_PINS, null)
+            ?.split(ORDER_SEPARATOR)
+            ?.filter { it.isNotEmpty() }
+            ?.toSet()
+            ?: emptySet()
 }
 
 /**

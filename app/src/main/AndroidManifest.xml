@@ -35,9 +35,18 @@
       for no security gain the user cares about here (this app streams media,
       it has no account or credential of its own to protect in transit).
     -->
+    <!--
+      largeHeap: the whole point of this app is decoding several videos at
+      once, and each ExoPlayer holds its own decode/render buffers. At high
+      tile counts the default per-process heap (as little as 256 MB on some
+      devices) is exhausted and the process is OOM-killed mid-playback. The
+      buffer window is also tuned down per pane count in SegmentPlayerManager;
+      this raises the ceiling the two share.
+    -->
     <application
         android:name=".TiledPlayerApp"
         android:allowBackup="false"
+        android:largeHeap="true"
         android:usesCleartextTraffic="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"

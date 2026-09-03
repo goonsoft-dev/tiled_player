@@ -32,8 +32,8 @@ android {
         applicationId = "com.example.tiledplayer"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "0.5-vault"
+        versionCode = 9
+        versionName = "0.6-vault"
     }
 
     // Release signing for private distribution (sideloading). Credentials come
@@ -77,6 +77,9 @@ android {
     }
     buildFeatures {
         compose = true
+        // Generates BuildConfig.VERSION_NAME / VERSION_CODE, shown on the
+        // library screen and in the "What's new" dialog.
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"
