@@ -1,7 +1,9 @@
 package com.example.tiledplayer
 
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.view.View
 import android.view.WindowManager
 import java.io.File
 import androidx.activity.ComponentActivity
@@ -33,6 +35,18 @@ class MainActivity : ComponentActivity() {
         // captured unprotected, not even for the moment before Compose runs.
         applySecureScreen(VaultPrefs.loadSecureScreen(this))
         WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        // Opt the whole window out of the content-capture pipeline. It walks
+        // the Compose semantics tree on every structural change, allocating a
+        // fake LayoutNode per node; with 16-25 video tiles on screen that walk
+        // was large enough to be the allocation that tipped an already-tight
+        // heap into OutOfMemoryError (seen crashing in
+        // AndroidContentCaptureManager.sendContentCaptureStructureChangeEvents).
+        // This app has nothing worth capturing, so it is pure overhead.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.decorView.importantForContentCapture =
+                View.IMPORTANT_FOR_CONTENT_CAPTURE_NO_EXCLUDE_DESCENDANTS
+        }
 
         val handoff = HandoffIntent.from(this, intent)
         val initialSession = debugSessionFromIntent() ?: (handoff as? HandoffIntent.Play)?.session

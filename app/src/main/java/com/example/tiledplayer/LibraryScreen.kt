@@ -267,6 +267,8 @@ fun LibraryScreen(
     var lastCrash by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) { lastCrash = CrashReporter.consumeLastCrash(context) }
 
+    var showWhatsNew by remember { mutableStateOf(false) }
+
     var videos by remember { mutableStateOf<List<VideoItem>?>(null) }
     LaunchedEffect(hasPermission, deviceReloadKey) {
         if (hasPermission) {
@@ -339,6 +341,7 @@ fun LibraryScreen(
             },
             onExportAll = { startExport(vaultItems.orEmpty().map { it.id }) },
             exportEnabled = !vaultItems.isNullOrEmpty(),
+            onShowWhatsNew = { showWhatsNew = true },
         )
         LibraryControlBar(
             minRating = minRating,
@@ -353,7 +356,7 @@ fun LibraryScreen(
             onOpenBrowser = { onOpenBrowser(null) },
         )
 
-        Box(modifier = Modifier.fillMaxSize()) {
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when {
                 tab == LibraryTab.DEVICE && !hasPermission -> PermissionGate(
                     onGrantAccess = { permissionLauncher.launch(VideoLibraryRepository.requiredPermission) },
@@ -452,6 +455,12 @@ fun LibraryScreen(
                 )
             }
         }
+
+        AppVersionFooter(onClick = { showWhatsNew = true })
+    }
+
+    if (showWhatsNew) {
+        WhatsNewDialog(onDismiss = { showWhatsNew = false })
     }
 
     if (!importState.idle) {
@@ -699,6 +708,7 @@ private fun LibraryTabBar(
     onSecureScreenToggle: () -> Unit,
     onExportAll: () -> Unit,
     exportEnabled: Boolean,
+    onShowWhatsNew: () -> Unit,
 ) {
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
@@ -770,9 +780,32 @@ private fun LibraryTabBar(
                         menuOpen = false
                     },
                 )
+                DropdownMenuItem(
+                    text = { Text("What's new  ·  v${BuildConfig.VERSION_NAME}") },
+                    onClick = { menuOpen = false; onShowWhatsNew() },
+                )
             }
         }
     }
+}
+
+/**
+ * A quiet line at the very bottom of the library: the app name and version,
+ * tappable to open the "What's new" history. Deliberately low-contrast so it
+ * reads as a footer, not a control.
+ */
+@Composable
+private fun AppVersionFooter(onClick: () -> Unit) {
+    Text(
+        "Tiled Player  ·  v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 6.dp),
+    )
 }
 
 @Composable

@@ -17,6 +17,7 @@ import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -215,6 +216,12 @@ fun BrowserScreen(
     var addressText by remember { mutableStateOf("") }
     val addressFocus = remember { FocusRequester() }
 
+    // Collapsed while scrolling down a page, so the address bar and tab strip
+    // aren't eating screen height once you're reading. Revealed on scroll-up,
+    // at the top of a page, and whenever the tab changes.
+    var chromeHidden by remember { mutableStateOf(false) }
+    var blockAds by remember { mutableStateOf(WebContentBlocker.isEnabled(context)) }
+
     // Restore the previous session before anything reads the tab list.
     LaunchedEffect(Unit) {
         BrowserTabs.restoreOnce(context)
@@ -283,8 +290,11 @@ fun BrowserScreen(
             ): WebResourceResponse? {
                 // Background thread, once per subresource: stay cheap, don't
                 // touch the WebView. Returning null lets it proceed untouched.
+                val url = request.url.toString()
+                if (WebContentBlocker.isEnabled(context) && WebContentBlocker.shouldBlock(url)) {
+                    return WebContentBlocker.blockedResponse()
+                }
                 classify(request)?.let { kind ->
-                    val url = request.url.toString()
                     val pageUrl = target.url
                     v.post {
                         if (target.hits.none { it.url == url } && target.hits.size < MAX_HITS) {
@@ -302,7 +312,39 @@ fun BrowserScreen(
                 request: WebResourceRequest,
             ): Boolean {
                 val uri = request.url
-                if (uri.scheme == "http" || uri.scheme == "https") return false
+                if (uri.scheme == "http" || uri.scheme == "https") {
+                    // Only guard the main frame; sub-frame ad iframes are the
+                    // blocklist's job.
+                    if (!request.isForMainFrame) return false
+                    val dest = uri.toString()
+                    val now = System.currentTimeMillis()
+                    val userDriven = request.hasGesture() ||
+                        now - target.lastUserNavAtMs < 1500L
+                    val from = target.url
+                    val crossOrigin = from.isNotBlank() && !sameHost(from, dest)
+                    // Let through: anything the user set in motion, staying on
+                    // the same site, or an HTTP 3xx (CDN / geo / login hops).
+                    if (userDriven || !crossOrigin || request.isRedirect) {
+                        if (userDriven) target.sneakyNavCount = 0
+                        if (WebContentBlocker.isEnabled(context) &&
+                            WebContentBlocker.shouldBlock(dest)
+                        ) {
+                            return true // never navigate the page itself onto an ad host
+                        }
+                        return false
+                    }
+                    // What's left is a page quietly sending you to another
+                    // domain with no click involved — the online-video redirect.
+                    target.sneakyNavCount++
+                    val settled = target.pageSettledAtMs > 0L &&
+                        now - target.pageSettledAtMs > 400L
+                    if (!WebContentBlocker.isEnabled(context)) return false
+                    if (settled || target.sneakyNavCount >= 2) {
+                        target.blockedRedirect = dest
+                        return true
+                    }
+                    return false
+                }
                 // An app link (intent:, market:, tel:, ...) can't load here.
                 // Many carry a browser_fallback_url meant for exactly this.
                 val fallback = fallbackUrlFrom(uri)
@@ -316,6 +358,10 @@ fun BrowserScreen(
 
             override fun onPageStarted(v: WebView, url: String?, favicon: android.graphics.Bitmap?) {
                 target.loading = true
+                // A fresh main-frame load resets the redirect guard's baseline.
+                target.pageSettledAtMs = 0L
+                target.sneakyNavCount = 0
+                chromeHidden = false
                 if (url != null && (url.startsWith("http://") || url.startsWith("https://"))) {
                     if (url != target.url) target.hits.clear()
                     target.url = url
@@ -327,6 +373,7 @@ fun BrowserScreen(
                 target.title = v.title.orEmpty()
                 target.canGoBack = v.canGoBack()
                 target.canGoForward = v.canGoForward()
+                target.pageSettledAtMs = System.currentTimeMillis()
                 if (url != null && url.startsWith("http")) target.url = url
                 BrowserTabs.persist(context)
             }
@@ -361,14 +408,20 @@ fun BrowserScreen(
                 isUserGesture: Boolean,
                 resultMsg: Message,
             ): Boolean {
-                // This is the fix for "the play button does nothing": the page
-                // asked for a new window, and without handling it here the
-                // request is dropped and the click appears to be swallowed.
-                val opened = BrowserTabs.open(null, select = true)
-                if (opened == null) {
-                    notice = "Pop-up blocked — all $MAX_BROWSER_TABS tabs are in use."
+                // No gesture behind it → it's a pop-under / auto pop-up. Drop it
+                // silently (that's what a pop-up blocker does). A real tap that
+                // opens a window still works because isUserGesture is true then.
+                if (!isUserGesture && WebContentBlocker.isEnabled(context)) {
                     return false
                 }
+                // A gesture-backed window is a genuine "open in new tab": the
+                // fix for "the play button does nothing".
+                val opened = BrowserTabs.open(null, select = true)
+                if (opened == null) {
+                    notice = "Can't open another tab — all $MAX_BROWSER_TABS are in use."
+                    return false
+                }
+                opened.openerId = target.id
                 val child = configure(opened, loadInitial = false)
                 val transport = resultMsg.obj as WebView.WebViewTransport
                 transport.webView = child
@@ -452,6 +505,18 @@ fun BrowserScreen(
             }
         }
 
+        // Collapse the chrome while scrolling down into a page, bring it back on
+        // any scroll up or near the top. Small threshold so a stray pixel of
+        // movement doesn't toggle it.
+        view.setOnScrollChangeListener { _, _, scrollY, _, oldScrollY ->
+            val dy = scrollY - oldScrollY
+            when {
+                scrollY <= 48 -> chromeHidden = false
+                dy > 6 -> chromeHidden = true
+                dy < -6 -> chromeHidden = false
+            }
+        }
+
         target.webView = view
         if (loadInitial) {
             target.pendingUrl?.let { pending ->
@@ -471,21 +536,32 @@ fun BrowserScreen(
         val url = normalizeUrl(addressText)
         if (target != null && url != null) {
             target.hits.clear()
+            target.blockedRedirect = null
+            target.lastUserNavAtMs = System.currentTimeMillis()
             target.webView?.loadUrl(url) ?: run { target.pendingUrl = url }
         } else if (url == null) {
             notice = "That doesn't look like an address."
         }
     }
 
+    // Mark a user-driven navigation so the redirect guard lets the resulting
+    // page loads through.
+    val markUserNav = { BrowserTabs.active?.let { it.lastUserNavAtMs = System.currentTimeMillis() } }
+
     BackHandler {
-        val view = BrowserTabs.active?.webView
+        val current = BrowserTabs.active
+        val view = current?.webView
         when {
             customView != null -> {
                 customViewCallback?.onCustomViewHidden()
                 customView = null
                 customViewCallback = null
             }
-            view != null && view.canGoBack() -> view.goBack()
+            current?.blockedRedirect != null -> current.blockedRedirect = null
+            view != null && view.canGoBack() -> { markUserNav(); view.goBack() }
+            // A tab a link spawned, with nowhere to go back to, closes and
+            // returns you to the tab that opened it — like a real browser.
+            current?.openerId != null && BrowserTabs.tabs.size > 1 -> BrowserTabs.close(current)
             else -> onExit()
         }
     }
@@ -510,38 +586,51 @@ fun BrowserScreen(
     }
 
     Column(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 2.dp, top = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onExit) { Text("✕", style = MaterialTheme.typography.titleLarge) }
-            IconButton(
-                onClick = { BrowserTabs.active?.webView?.goBack() },
-                enabled = tab?.canGoBack == true,
-            ) { Text("‹", style = MaterialTheme.typography.headlineSmall) }
-            IconButton(
-                onClick = { BrowserTabs.active?.webView?.goForward() },
-                enabled = tab?.canGoForward == true,
-            ) { Text("›", style = MaterialTheme.typography.headlineSmall) }
-            OutlinedTextField(
-                value = addressText,
-                onValueChange = { addressText = it },
-                singleLine = true,
-                placeholder = { Text("Search or paste a link") },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                keyboardActions = KeyboardActions(onGo = { go() }),
-                modifier = Modifier.weight(1f).focusRequester(addressFocus),
-            )
-            IconButton(onClick = {
-                val view = BrowserTabs.active?.webView
-                if (tab?.loading == true) view?.stopLoading() else view?.reload()
-            }) {
-                Text(if (tab?.loading == true) "✕" else "⟳", style = MaterialTheme.typography.titleMedium)
-            }
-            Box {
-                IconButton(onClick = { menuOpen = true }) {
-                    Text("⋮", style = MaterialTheme.typography.titleLarge)
+        AnimatedVisibility(visible = !chromeHidden) {
+          Column {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 2.dp, end = 0.dp, top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(
+                    onClick = { markUserNav(); BrowserTabs.active?.webView?.goBack() },
+                    enabled = tab?.canGoBack == true,
+                    modifier = Modifier.size(38.dp),
+                ) { Text("‹", style = MaterialTheme.typography.headlineSmall) }
+                IconButton(
+                    onClick = { markUserNav(); BrowserTabs.active?.webView?.goForward() },
+                    enabled = tab?.canGoForward == true,
+                    modifier = Modifier.size(38.dp),
+                ) { Text("›", style = MaterialTheme.typography.headlineSmall) }
+                OutlinedTextField(
+                    value = addressText,
+                    onValueChange = { addressText = it },
+                    singleLine = true,
+                    placeholder = { Text("Search or paste a link") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(onGo = { go() }),
+                    modifier = Modifier.weight(1f).focusRequester(addressFocus),
+                )
+                IconButton(
+                    onClick = {
+                        val view = BrowserTabs.active?.webView
+                        if (tab?.loading == true) view?.stopLoading()
+                        else { markUserNav(); view?.reload() }
+                    },
+                    modifier = Modifier.size(38.dp),
+                ) {
+                    Text(
+                        if (tab?.loading == true) "✕" else "⟳",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
                 }
+                Box {
+                    IconButton(
+                        onClick = { menuOpen = true },
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Text("⋮", style = MaterialTheme.typography.titleLarge)
+                    }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     DropdownMenuItem(
                         text = { Text("New tab") },
@@ -550,6 +639,17 @@ fun BrowserScreen(
                             if (BrowserTabs.open(null) == null) {
                                 notice = "That's the $MAX_BROWSER_TABS-tab limit."
                             }
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text((if (blockAds) "✓ " else "    ") + "Block ads & pop-ups")
+                        },
+                        onClick = {
+                            menuOpen = false
+                            blockAds = !blockAds
+                            WebContentBlocker.setEnabled(context, blockAds)
+                            BrowserTabs.active?.webView?.reload()
                         },
                     )
                     DropdownMenuItem(
@@ -629,6 +729,20 @@ fun BrowserScreen(
             if (hitCount > 0) {
                 Button(onClick = { showHits = true }) { Text("Show") }
             }
+        }
+          }
+        }
+
+        tab?.blockedRedirect?.let { blocked ->
+            RedirectBar(
+                targetUrl = blocked,
+                onAllow = {
+                    tab.blockedRedirect = null
+                    tab.lastUserNavAtMs = System.currentTimeMillis()
+                    tab.webView?.loadUrl(blocked)
+                },
+                onDismiss = { tab.blockedRedirect = null },
+            )
         }
 
         Box(modifier = Modifier.fillMaxSize()) {
@@ -851,6 +965,46 @@ private fun MediaHitsDialog(
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
     )
+}
+
+/** The bar shown when the redirect guard stops a page from bouncing you away. */
+@Composable
+private fun RedirectBar(targetUrl: String, onAllow: () -> Unit, onDismiss: () -> Unit) {
+    val host = runCatching { Uri.parse(targetUrl).host }.getOrNull() ?: targetUrl
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.secondaryContainer)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "Stopped a redirect to $host",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        TextButton(onClick = onAllow) { Text("Go there") }
+        Text(
+            "✕",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier.clickable(onClick = onDismiss).padding(horizontal = 8.dp, vertical = 4.dp),
+        )
+    }
+}
+
+/** Same registrable-ish domain? Compares the last two host labels, so
+ * `www.x.com` and `cdn.x.com` match but `x.com` and `ads.net` don't. */
+private fun sameHost(a: String, b: String): Boolean {
+    fun key(u: String): String? = runCatching {
+        Uri.parse(u).host?.lowercase()?.split('.')?.takeLast(2)?.joinToString(".")
+    }.getOrNull()
+    val ka = key(a) ?: return false
+    val kb = key(b) ?: return false
+    return ka == kb
 }
 
 /** Whether this request looks like media, and if so what kind. */

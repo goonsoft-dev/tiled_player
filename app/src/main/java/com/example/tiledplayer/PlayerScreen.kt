@@ -3,10 +3,12 @@ package com.example.tiledplayer
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.displayCutoutPadding
@@ -16,14 +18,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RangeSlider
@@ -57,6 +64,9 @@ import kotlin.math.sqrt
 import kotlinx.coroutines.delay
 
 private const val MAX_GRID_DIM = 5
+
+/** [LayoutPrefs] ribbon-pin sentinel for "the grid-size steppers" (not a preset name). */
+private const val RIBBON_PIN_GRID = "#grid"
 
 private const val SLOW_MO_SPEED = 0.25f
 private const val SLOW_MO_RAMP_STEPS = 6
@@ -154,6 +164,12 @@ fun PlayerScreen(session: PlaybackSession, onExit: () -> Unit) {
         LayoutPrefs.saveRandomRangeSec(context, randomRangeSec.first, randomRangeSec.second)
     }
 
+    // Which layout controls the user has pinned as quick buttons in the ribbon
+    // (preset names + the RIBBON_PIN_GRID sentinel). Empty = ribbon is just the
+    // dropdown; the "Customize ribbon…" menu item edits this.
+    var ribbonPins by remember(session) { mutableStateOf(LayoutPrefs.loadRibbonPins(context)) }
+    LaunchedEffect(ribbonPins) { LayoutPrefs.saveRibbonPins(context, ribbonPins) }
+
     // Rebuild players when the number of panes changes, or when toggling
     // between loop and random mode (the clip plan itself differs); adjusting
     // the random range while already in random mode applies live instead
@@ -171,7 +187,14 @@ fun PlayerScreen(session: PlaybackSession, onExit: () -> Unit) {
     LaunchedEffect(manager, randomRangeSec) {
         manager.setRandomRange(randomRangeSec.first * 1000L, randomRangeSec.second * 1000L)
     }
-    var status by remember(manager) { mutableStateOf<PlayerStatus>(PlayerStatus.Loading) }
+    // Keyed on the session, not the manager: changing the grid size rebuilds
+    // the manager, and resetting to Loading there would tear down ReadyContent
+    // (closing the layout menu) and flash a spinner on every +/- tap. Instead
+    // the new manager's panes just fill back in under the still-mounted UI.
+    var status by remember(session) { mutableStateOf<PlayerStatus>(PlayerStatus.Loading) }
+    // The layout dropdown's open state lives here (above the Loading/Ready
+    // switch) so a grid-size change that rebuilds the manager doesn't close it.
+    var layoutMenuOpen by remember(session) { mutableStateOf(false) }
 
     // Identifies the active layout for the purpose of remembering its audio.
     val layoutKey = remember(selection, gridRows, gridCols) {
@@ -211,6 +234,9 @@ fun PlayerScreen(session: PlaybackSession, onExit: () -> Unit) {
     val failedPanes = remember(manager) { mutableStateListOf<Int>() }
 
     DisposableEffect(manager) {
+        // A rebuilt manager recovering from a previous all-failed session needs
+        // the stale error cleared; a healthy rebuild keeps showing ReadyContent.
+        if (status is PlayerStatus.Error) status = PlayerStatus.Loading
         manager.initialize(
             onReady = { status = PlayerStatus.Ready },
             onError = { msg -> status = PlayerStatus.Error(msg) },
@@ -301,6 +327,12 @@ fun PlayerScreen(session: PlaybackSession, onExit: () -> Unit) {
                     onToggleRandomMode = { randomModeOn = !randomModeOn },
                     randomRangeSec = randomRangeSec,
                     onRandomRangeChange = { randomRangeSec = it },
+                    ribbonPins = ribbonPins,
+                    onToggleRibbonPin = { key ->
+                        ribbonPins = ribbonPins.toMutableSet().apply { if (!add(key)) remove(key) }
+                    },
+                    layoutMenuOpen = layoutMenuOpen,
+                    onLayoutMenuOpenChange = { layoutMenuOpen = it },
                     onExit = onExit,
                 )
         }
@@ -330,6 +362,10 @@ private fun ReadyContent(
     onToggleRandomMode: () -> Unit,
     randomRangeSec: Pair<Int, Int>,
     onRandomRangeChange: (Pair<Int, Int>) -> Unit,
+    ribbonPins: Set<String>,
+    onToggleRibbonPin: (String) -> Unit,
+    layoutMenuOpen: Boolean,
+    onLayoutMenuOpenChange: (Boolean) -> Unit,
     onExit: () -> Unit,
 ) {
     var showControls by remember { mutableStateOf(true) }
@@ -348,6 +384,7 @@ private fun ReadyContent(
     val controlTopInset = with(density) { topBarHeightPx.toDp() }
     var showReorderDialog by remember { mutableStateOf(false) }
     var showRandomRangeDialog by remember { mutableStateOf(false) }
+    var showCustomizeRibbonDialog by remember { mutableStateOf(false) }
 
     // A plain var re-read every tick below, not captured once: an unclipped
     // pane (adaptive stream with no probe-able duration) starts at 0 and only
@@ -373,9 +410,10 @@ private fun ReadyContent(
     }
 
     // Auto-hide the controls a few seconds after they appear while playing,
-    // counting from the most recent interaction.
-    LaunchedEffect(showControls, isPlaying, userSeeking, interactionTick) {
-        if (showControls && isPlaying && !userSeeking) {
+    // counting from the most recent interaction. Held open while the layout
+    // dropdown is showing, since its anchor lives inside these controls.
+    LaunchedEffect(showControls, isPlaying, userSeeking, interactionTick, layoutMenuOpen) {
+        if (showControls && isPlaying && !userSeeking && !layoutMenuOpen) {
             delay(3500)
             showControls = false
         }
@@ -433,75 +471,95 @@ private fun ReadyContent(
                     onClick = onExit,
                     modifier = Modifier.semantics { contentDescription = "Exit player" },
                 ) { Text("✕") }
+
+                val layoutLabel = when (selection) {
+                    is PresetSelection.Grid -> "▦ ${gridRows}×$gridCols"
+                    is PresetSelection.Named -> "▦ ${selection.preset.name}"
+                }
+                Box {
+                    FilledTonalButton(
+                        onClick = { interactionTick++; onLayoutMenuOpenChange(true) },
+                        modifier = Modifier.semantics {
+                            contentDescription = "Layout and play mode"
+                        },
+                    ) {
+                        Text(layoutLabel + (if (randomModeOn) "  🎲" else "") + "  ▾")
+                    }
+                    LayoutMenu(
+                        expanded = layoutMenuOpen,
+                        onDismiss = { onLayoutMenuOpenChange(false) },
+                        selection = selection,
+                        gridRows = gridRows,
+                        gridCols = gridCols,
+                        presets = presets,
+                        randomModeOn = randomModeOn,
+                        randomRangeSec = randomRangeSec,
+                        onSelectGrid = { interactionTick++; onSelectGrid() },
+                        onGridRowsChange = { interactionTick++; onGridRowsChange(it) },
+                        onGridColsChange = { interactionTick++; onGridColsChange(it) },
+                        onSelectPreset = {
+                            interactionTick++; onSelectPreset(it); onLayoutMenuOpenChange(false)
+                        },
+                        onToggleRandomMode = { interactionTick++; onToggleRandomMode() },
+                        onOpenRandomRange = {
+                            interactionTick++; onLayoutMenuOpenChange(false); showRandomRangeDialog = true
+                        },
+                        onReorderPresets = {
+                            interactionTick++; onLayoutMenuOpenChange(false); showReorderDialog = true
+                        },
+                        onCustomizeRibbon = {
+                            interactionTick++
+                            onLayoutMenuOpenChange(false)
+                            showCustomizeRibbonDialog = true
+                        },
+                    )
+                }
+
+                // Whatever the user has pinned stays here as quick buttons,
+                // scrolling in the space left over so the ✕ and the dropdown
+                // above never get pushed off-screen.
                 Row(
                     modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
+                    if (RIBBON_PIN_GRID in ribbonPins) {
                         FilledTonalButton(
                             onClick = { interactionTick++; onGridRowsChange(gridRows - 1) },
-                            enabled = gridRows > 1
-                        ) {
-                            Text("row −")
-                        }
+                            enabled = gridRows > 1,
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                        ) { Text("R−") }
                         FilledTonalButton(
                             onClick = { interactionTick++; onGridRowsChange(gridRows + 1) },
-                            enabled = gridRows < MAX_GRID_DIM
-                        ) {
-                            Text("row +")
-                        }
+                            enabled = gridRows < MAX_GRID_DIM,
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                        ) { Text("R+") }
                         FilterChip(
                             selected = selection is PresetSelection.Grid,
                             onClick = { interactionTick++; onSelectGrid() },
-                            label = { Text("${gridRows}×$gridCols") }
+                            label = { Text("${gridRows}×$gridCols") },
                         )
                         FilledTonalButton(
                             onClick = { interactionTick++; onGridColsChange(gridCols - 1) },
-                            enabled = gridCols > 1
-                        ) {
-                            Text("col −")
-                        }
+                            enabled = gridCols > 1,
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                        ) { Text("C−") }
                         FilledTonalButton(
                             onClick = { interactionTick++; onGridColsChange(gridCols + 1) },
-                            enabled = gridCols < MAX_GRID_DIM
-                        ) {
-                            Text("col +")
-                        }
-                    }
-                    FilterChip(
-                        selected = randomModeOn,
-                        onClick = { interactionTick++; onToggleRandomMode() },
-                        label = { Text("🎲 Random") }
-                    )
-                    if (randomModeOn) {
-                        FilledTonalButton(
-                            onClick = { interactionTick++; showRandomRangeDialog = true },
-                            modifier = Modifier.semantics { contentDescription = "Random segment length" },
-                        ) {
-                            Text("${randomRangeSec.first}–${randomRangeSec.second}s")
-                        }
+                            enabled = gridCols < MAX_GRID_DIM,
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                        ) { Text("C+") }
                     }
                     presets.forEach { preset ->
-                        FilterChip(
-                            selected = selection is PresetSelection.Named && selection.preset === preset,
-                            onClick = { interactionTick++; onSelectPreset(preset) },
-                            label = { Text(preset.name) }
-                        )
+                        if (preset.name in ribbonPins) {
+                            FilterChip(
+                                selected = selection is PresetSelection.Named &&
+                                    selection.preset === preset,
+                                onClick = { interactionTick++; onSelectPreset(preset) },
+                                label = { Text(preset.name) },
+                            )
+                        }
                     }
-                }
-                // Fixed at the far end of the ribbon (unlike the chips, which
-                // scroll) so it stays reachable regardless of how many presets
-                // there are — but away from the exit button, which used to sit
-                // right next to it and was an easy accidental tap while
-                // reaching for exit.
-                FilledTonalButton(
-                    onClick = { interactionTick++; showReorderDialog = true },
-                    modifier = Modifier.semantics { contentDescription = "Reorder layouts" },
-                ) {
-                    Text("↕")
                 }
             }
         }
@@ -519,6 +577,15 @@ private fun ReadyContent(
                 rangeSec = randomRangeSec,
                 onRangeChange = onRandomRangeChange,
                 onDismiss = { showRandomRangeDialog = false },
+            )
+        }
+
+        if (showCustomizeRibbonDialog) {
+            CustomizeRibbonDialog(
+                presets = presets,
+                pinned = ribbonPins,
+                onTogglePin = onToggleRibbonPin,
+                onDismiss = { showCustomizeRibbonDialog = false },
             )
         }
 
@@ -577,6 +644,175 @@ private fun ReadyContent(
                     .padding(horizontal = 16.dp, vertical = 6.dp)
             )
         }
+    }
+}
+
+/**
+ * The player's single ribbon control: one dropdown that holds the grid-size
+ * steppers, the named presets, and the loop/random play mode. Replaces the old
+ * horizontally-scrolling row of chips, which grew unreadable once random mode
+ * and its range button were added next to every preset.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LayoutMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    selection: PresetSelection,
+    gridRows: Int,
+    gridCols: Int,
+    presets: List<LayoutPreset>,
+    randomModeOn: Boolean,
+    randomRangeSec: Pair<Int, Int>,
+    onSelectGrid: () -> Unit,
+    onGridRowsChange: (Int) -> Unit,
+    onGridColsChange: (Int) -> Unit,
+    onSelectPreset: (LayoutPreset) -> Unit,
+    onToggleRandomMode: () -> Unit,
+    onOpenRandomRange: () -> Unit,
+    onReorderPresets: () -> Unit,
+    onCustomizeRibbon: () -> Unit,
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        MenuSectionLabel("Grid size")
+        MenuStepperRow("Rows", gridRows, 1..MAX_GRID_DIM, onGridRowsChange)
+        MenuStepperRow("Columns", gridCols, 1..MAX_GRID_DIM, onGridColsChange)
+        DropdownMenuItem(
+            text = { Text("Use ${gridRows}×$gridCols grid") },
+            leadingIcon = { Text(if (selection is PresetSelection.Grid) "●" else "  ") },
+            onClick = onSelectGrid,
+        )
+
+        HorizontalDivider()
+        MenuSectionLabel("Preset")
+        presets.forEach { preset ->
+            val active = selection is PresetSelection.Named && selection.preset === preset
+            DropdownMenuItem(
+                text = { Text(preset.name) },
+                leadingIcon = { Text(if (active) "●" else "  ") },
+                onClick = { onSelectPreset(preset) },
+            )
+        }
+        DropdownMenuItem(
+            text = { Text("Reorder presets…") },
+            onClick = onReorderPresets,
+        )
+        DropdownMenuItem(
+            text = { Text("Customize ribbon…") },
+            onClick = onCustomizeRibbon,
+        )
+
+        HorizontalDivider()
+        MenuSectionLabel("Play mode")
+        DropdownMenuItem(
+            text = { Text("Random clips") },
+            leadingIcon = { Text(if (randomModeOn) "☑" else "☐") },
+            onClick = onToggleRandomMode,
+        )
+        if (randomModeOn) {
+            DropdownMenuItem(
+                text = { Text("Clip length: ${randomRangeSec.first}–${randomRangeSec.second}s…") },
+                onClick = onOpenRandomRange,
+            )
+        }
+    }
+}
+
+@Composable
+private fun MenuSectionLabel(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 16.dp, top = 10.dp, bottom = 2.dp),
+    )
+}
+
+@Composable
+private fun MenuStepperRow(
+    label: String,
+    value: Int,
+    range: IntRange,
+    onChange: (Int) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        FilledTonalButton(
+            onClick = { onChange(value - 1) },
+            enabled = value > range.first,
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+        ) { Text("−") }
+        Text(
+            "$value",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.widthIn(min = 24.dp),
+        )
+        FilledTonalButton(
+            onClick = { onChange(value + 1) },
+            enabled = value < range.last,
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+        ) { Text("+") }
+    }
+}
+
+/**
+ * Picks which layout controls stay in the ribbon as quick buttons. Everything
+ * is always reachable from the dropdown regardless; this just promotes a chosen
+ * few back out onto the bar. Toggles apply immediately (no Save step).
+ */
+@Composable
+private fun CustomizeRibbonDialog(
+    presets: List<LayoutPreset>,
+    pinned: Set<String>,
+    onTogglePin: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Keep in the ribbon") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    "Checked controls stay as buttons in the player's top bar. " +
+                        "Everything is always available from the ▾ menu.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                RibbonPinRow("Grid size buttons", RIBBON_PIN_GRID in pinned) {
+                    onTogglePin(RIBBON_PIN_GRID)
+                }
+                presets.forEach { preset ->
+                    RibbonPinRow(preset.name, preset.name in pinned) { onTogglePin(preset.name) }
+                }
+            }
+        },
+        confirmButton = { Button(onClick = onDismiss) { Text("Done") } },
+    )
+}
+
+@Composable
+private fun RibbonPinRow(label: String, checked: Boolean, onToggle: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onToggle)
+            .padding(vertical = 8.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(if (checked) "☑" else "☐", style = MaterialTheme.typography.titleMedium)
+        Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }
 

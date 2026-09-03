@@ -62,7 +62,8 @@ private fun loadThumbnailBlocking(context: Context, item: VideoItem): Bitmap? = 
 private fun loadVaultThumbnail(item: VideoItem): Bitmap? {
     val thumb = item.thumbPath?.let { File(it) }
     if (thumb != null && thumb.isFile) {
-        BitmapFactory.decodeFile(thumb.absolutePath)?.let { return it }
+        decodeDownsampled(thumb.absolutePath, THUMBNAIL_SIZE.width, THUMBNAIL_SIZE.height)
+            ?.let { return it }
     }
     val video = File(item.uri.path ?: return null)
     if (!video.isFile) return null
@@ -75,6 +76,24 @@ private fun loadVaultThumbnail(item: VideoItem): Bitmap? {
         }
     }
     return generated
+}
+
+/**
+ * Decodes a bitmap file no larger than roughly [reqW]x[reqH], halving via
+ * [BitmapFactory.Options.inSampleSize] until it fits. A poster JPEG saved at
+ * full video resolution (1080p+) would otherwise be held in the 40-slot cache
+ * at ~8MB each — enough, times 40, to be a real share of the heap the tiled
+ * player is already competing for.
+ */
+private fun decodeDownsampled(path: String, reqW: Int, reqH: Int): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= reqW && bounds.outHeight / (sample * 2) >= reqH) {
+        sample *= 2
+    }
+    return BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
 }
 
 @Composable

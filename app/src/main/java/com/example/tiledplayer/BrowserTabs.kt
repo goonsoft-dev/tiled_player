@@ -38,6 +38,20 @@ class BrowserTab(val id: Long) {
      */
     var pendingUrl: String? = null
 
+    /** The tab that spawned this one via a link / window.open, if any. Back
+     * from a spawned tab with no history closes it and returns here. */
+    var openerId: Long? = null
+
+    // --- redirect guard (see BrowserScreen.shouldOverrideUrlLoading) --------
+    /** Wall-clock ms of the last navigation the user actually triggered. */
+    var lastUserNavAtMs: Long = 0L
+    /** Wall-clock ms the current page finished loading (a safe "settled" baseline). */
+    var pageSettledAtMs: Long = 0L
+    /** Non-gesture cross-origin navigations since the current page settled. */
+    var sneakyNavCount: Int = 0
+    /** A redirect that was blocked, surfaced as an "allow it?" bar. */
+    var blockedRedirect: String? by mutableStateOf(null)
+
     val label: String
         get() = title.ifBlank { if (url.isBlank()) "New tab" else titleFromUrl(url) }
 }
@@ -124,11 +138,17 @@ object BrowserTabs {
             }
         }
         tab.webView = null
+        val opener = tab.openerId?.let { id -> tabs.firstOrNull { it.id == id } }
+        val wasActive = activeIndex == index
         tabs.removeAt(index)
-        if (tabs.isEmpty()) {
-            open(null)
-        } else if (activeIndex >= tabs.size) {
-            activeIndex = tabs.lastIndex
+        // Any tab that pointed at this one as its opener is now orphaned.
+        tabs.forEach { if (it.openerId == tab.id) it.openerId = null }
+        val openerIndex = opener?.let { tabs.indexOf(it) } ?: -1
+        when {
+            tabs.isEmpty() -> open(null)
+            wasActive && openerIndex >= 0 -> activeIndex = openerIndex
+            activeIndex > index -> activeIndex -= 1
+            activeIndex >= tabs.size -> activeIndex = tabs.lastIndex
         }
     }
 
