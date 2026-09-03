@@ -26,6 +26,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -142,10 +143,33 @@ fun PlayerScreen(session: PlaybackSession, onExit: () -> Unit) {
     }
     val paneCount = remember(tree) { countLeaves(tree) }
 
-    // Rebuild players only when the number of panes changes; switching between
-    // presets with the same pane count just re-lays out the existing players.
-    val manager = remember(session, paneCount) {
-        SegmentPlayerManager(context, session.clips, paneCount)
+    // Alternative play mode: instead of each pane looping one fixed slice of
+    // its video forever, it plays an ever-changing run of random-length
+    // slices. Persisted like the layout selection, so relaunching resumes
+    // whichever mode (and range) was last active.
+    var randomModeOn by remember(session) { mutableStateOf(LayoutPrefs.loadRandomModeOn(context)) }
+    var randomRangeSec by remember(session) { mutableStateOf(LayoutPrefs.loadRandomRangeSec(context)) }
+    LaunchedEffect(randomModeOn, randomRangeSec) {
+        LayoutPrefs.saveRandomModeOn(context, randomModeOn)
+        LayoutPrefs.saveRandomRangeSec(context, randomRangeSec.first, randomRangeSec.second)
+    }
+
+    // Rebuild players when the number of panes changes, or when toggling
+    // between loop and random mode (the clip plan itself differs); adjusting
+    // the random range while already in random mode applies live instead
+    // (below) rather than tearing every pane down.
+    val manager = remember(session, paneCount, randomModeOn) {
+        SegmentPlayerManager(
+            context, session.clips, paneCount,
+            mode = if (randomModeOn) {
+                PlaybackMode.Random(randomRangeSec.first * 1000L, randomRangeSec.second * 1000L)
+            } else {
+                PlaybackMode.Loop
+            },
+        )
+    }
+    LaunchedEffect(manager, randomRangeSec) {
+        manager.setRandomRange(randomRangeSec.first * 1000L, randomRangeSec.second * 1000L)
     }
     var status by remember(manager) { mutableStateOf<PlayerStatus>(PlayerStatus.Loading) }
 
@@ -273,6 +297,10 @@ fun PlayerScreen(session: PlaybackSession, onExit: () -> Unit) {
                         }
                     },
                     failedPanes = failedPanes,
+                    randomModeOn = randomModeOn,
+                    onToggleRandomMode = { randomModeOn = !randomModeOn },
+                    randomRangeSec = randomRangeSec,
+                    onRandomRangeChange = { randomRangeSec = it },
                     onExit = onExit,
                 )
         }
@@ -298,6 +326,10 @@ private fun ReadyContent(
     assignment: List<Int>,
     onSwap: (Int, Int) -> Unit,
     failedPanes: List<Int>,
+    randomModeOn: Boolean,
+    onToggleRandomMode: () -> Unit,
+    randomRangeSec: Pair<Int, Int>,
+    onRandomRangeChange: (Pair<Int, Int>) -> Unit,
     onExit: () -> Unit,
 ) {
     var showControls by remember { mutableStateOf(true) }
@@ -315,6 +347,7 @@ private fun ReadyContent(
     val density = LocalDensity.current
     val controlTopInset = with(density) { topBarHeightPx.toDp() }
     var showReorderDialog by remember { mutableStateOf(false) }
+    var showRandomRangeDialog by remember { mutableStateOf(false) }
 
     // A plain var re-read every tick below, not captured once: an unclipped
     // pane (adaptive stream with no probe-able duration) starts at 0 and only
@@ -438,6 +471,19 @@ private fun ReadyContent(
                             Text("col +")
                         }
                     }
+                    FilterChip(
+                        selected = randomModeOn,
+                        onClick = { interactionTick++; onToggleRandomMode() },
+                        label = { Text("🎲 Random") }
+                    )
+                    if (randomModeOn) {
+                        FilledTonalButton(
+                            onClick = { interactionTick++; showRandomRangeDialog = true },
+                            modifier = Modifier.semantics { contentDescription = "Random segment length" },
+                        ) {
+                            Text("${randomRangeSec.first}–${randomRangeSec.second}s")
+                        }
+                    }
                     presets.forEach { preset ->
                         FilterChip(
                             selected = selection is PresetSelection.Named && selection.preset === preset,
@@ -465,6 +511,14 @@ private fun ReadyContent(
                 presets = presets,
                 onReorder = onReorderPresets,
                 onDismiss = { showReorderDialog = false },
+            )
+        }
+
+        if (showRandomRangeDialog) {
+            RandomRangeDialog(
+                rangeSec = randomRangeSec,
+                onRangeChange = onRandomRangeChange,
+                onDismiss = { showRandomRangeDialog = false },
             )
         }
 
@@ -579,6 +633,46 @@ private fun ReorderPresetsDialog(
         dismissButton = {
             OutlinedButton(onClick = onDismiss) { Text("Cancel") }
         }
+    )
+}
+
+/**
+ * Lets the user adjust the min/max length of a random-mode slice (see
+ * [PlaybackMode.Random]). Applies live as the range slider moves — there's
+ * nothing destructive to confirm or cancel, unlike [ReorderPresetsDialog].
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RandomRangeDialog(
+    rangeSec: Pair<Int, Int>,
+    onRangeChange: (Pair<Int, Int>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var range by remember { mutableStateOf(rangeSec.first.toFloat()..rangeSec.second.toFloat()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Random segment length") },
+        text = {
+            Column {
+                Text("${range.start.roundToInt()}s – ${range.endInclusive.roundToInt()}s")
+                RangeSlider(
+                    value = range,
+                    onValueChange = { newRange ->
+                        range = newRange
+                        onRangeChange(newRange.start.roundToInt() to newRange.endInclusive.roundToInt())
+                    },
+                    valueRange = 1f..60f,
+                )
+                Text(
+                    "Each pane plays a random clip in this length range from its video, " +
+                        "then jumps to a new random clip when it ends.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) { Text("Done") }
+        },
     )
 }
 

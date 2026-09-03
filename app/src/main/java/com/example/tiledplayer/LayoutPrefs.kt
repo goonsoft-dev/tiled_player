@@ -8,6 +8,9 @@ private const val KEY_GRID_COLS = "grid_cols"
 private const val KEY_PRESET_NAME = "preset_name"
 private const val KEY_PRESET_ORDER = "preset_order"
 private const val KEY_AUDIO_PREFIX = "audio_"
+private const val KEY_RANDOM_MODE = "random_mode"
+private const val KEY_RANDOM_MIN_SEC = "random_min_sec"
+private const val KEY_RANDOM_MAX_SEC = "random_max_sec"
 
 // None of the built-in preset names contain a pipe, so a plain split is safe.
 private const val ORDER_SEPARATOR = "|"
@@ -89,6 +92,28 @@ object LayoutPrefs {
         val saved = prefs(context).getString(KEY_AUDIO_PREFIX + layoutKey, null) ?: return null
         val values = saved.split(VOLUME_SEPARATOR).mapNotNull { it.toFloatOrNull() }
         return if (values.size == paneCount) values.map { it.coerceIn(0f, 1f) } else null
+    }
+
+    /** Whether the random-segment play mode (vs. the default fixed loop) was last active. */
+    fun saveRandomModeOn(context: Context, on: Boolean) {
+        prefs(context).edit().putBoolean(KEY_RANDOM_MODE, on).apply()
+    }
+
+    fun loadRandomModeOn(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_RANDOM_MODE, false)
+
+    /** The user-adjustable min/max random-segment length, in whole seconds. */
+    fun saveRandomRangeSec(context: Context, minSec: Int, maxSec: Int) {
+        prefs(context).edit()
+            .putInt(KEY_RANDOM_MIN_SEC, minSec)
+            .putInt(KEY_RANDOM_MAX_SEC, maxSec)
+            .apply()
+    }
+
+    /** Falls back to the 5-10s default range when nothing has been saved yet. */
+    fun loadRandomRangeSec(context: Context): Pair<Int, Int> {
+        val p = prefs(context)
+        return p.getInt(KEY_RANDOM_MIN_SEC, 5) to p.getInt(KEY_RANDOM_MAX_SEC, 10)
     }
 }
 

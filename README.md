@@ -3,7 +3,9 @@
 An Android video player that splits videos into equal time segments and plays
 them **all at once**, side by side, each pane looping its own slice. Layouts
 are live-editable: resize with dividers, swap panes, pinch-zoom individual
-tiles, unmute whichever pane you want to hear.
+tiles, unmute whichever pane you want to hear. An alternative **random-clip
+mode** swaps the fixed loop for an endless run of random-length clips per
+pane (length range adjustable) instead.
 
 Around that player sits a private video library, built for one specific
 constraint: **some OEM launchers' hidden-app drawers can't reach the
@@ -121,10 +123,10 @@ Playback core (§1–§7 of the spec):
 | File | Role |
 |---|---|
 | `GridLayout.kt`, `Presets.kt` | Layout tree, even-N grid, named presets |
-| `SegmentPlayerManager.kt` | One ExoPlayer per pane, segment planning, sync start, audio focus, per-pane failure isolation |
+| `SegmentPlayerManager.kt` | One ExoPlayer per pane, segment planning (fixed-loop or random-clip), sync start, audio focus, per-pane failure isolation |
 | `TileGrid.kt` | Split rendering, dividers, per-pane zoom/pan/swap gestures |
-| `PlayerScreen.kt` | Layout ribbon, transport, per-layout audio memory |
-| `LayoutPrefs.kt` | Persisted layout selection, preset order, per-layout audio |
+| `PlayerScreen.kt` | Layout ribbon, play-mode toggle, transport, per-layout audio memory |
+| `LayoutPrefs.kt` | Persisted layout selection, preset order, per-layout audio, play mode |
 
 Library and vault (§8):
 
